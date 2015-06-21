@@ -50,6 +50,10 @@ func (c *PowerCache) Initialize() {
 	c.statEvictions = 0
 }
 
+func (c *PowerCache) Length() int {
+	return len(c.values)
+}
+
 func (c *PowerCache) cleanUpIfNeccissary() {
 	c.mu.Lock()
 	shouldClean := false
