@@ -2,6 +2,7 @@ package cache
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,7 +18,7 @@ type PowerCache struct {
 	MaxSize                    int64
 	DefaultValueWeight         int64
 
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	values       map[string]interface{}
 	tstamp       map[string]time.Time
 	weight       map[string]int64
@@ -51,11 +52,13 @@ func (c *PowerCache) Initialize() {
 }
 
 func (c *PowerCache) Length() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return len(c.values)
 }
 
 func (c *PowerCache) cleanUpIfNeccissary() {
-	c.mu.Lock()
+	c.mu.RLock()
 	shouldClean := false
 	//Do periodic maintenence if this is a time based cache
 	if c.PeriodicMaintenance != emptyDuration {
@@ -71,8 +74,8 @@ func (c *PowerCache) cleanUpIfNeccissary() {
 	if c.MaxSize != 0 && c.cacheSizeEst >= c.MaxSize {
 		shouldClean = true
 	}
-	c.mu.Unlock()
 	//Clean
+	c.mu.RUnlock()
 	if shouldClean {
 		c.CleanUp()
 	}
@@ -105,8 +108,8 @@ func (c *PowerCache) loadWithValueLoader(key string, valueLoader ValueLoader) (i
 	}
 	loaddur := time.Now().Sub(start)
 	//Update Average Load Duration
+	atomic.AddInt64(&c.statLoadCount, 1)
 	c.mu.Lock()
-	c.statLoadCount++
 	c.statLoadDur = (c.statLoadDur + loaddur) / time.Duration(c.statLoadCount)
 	c.mu.Unlock()
 	c.Put(key, value)
@@ -125,18 +128,21 @@ func (c *PowerCache) GetIfPresent(key string) (interface{}, error) {
 	if c.isKeyExpired(key) {
 		c.Invalidate(key)
 	}
-	c.mu.Lock()
-	c.statReqs++
-	c.mu.Unlock()
-	if v, ok := c.values[key]; ok {
+	atomic.AddInt64(&c.statReqs, 1)
+	c.mu.RLock()
+	v, ok := c.values[key]
+	c.mu.RUnlock()
+	if ok {
 		if c.ExpiresAfterWriteDuration == emptyDuration && c.ExpiresAfterAccessDuration == emptyDuration {
+			c.mu.Lock()
 			c.tstamp[key] = time.Now()
+			c.mu.Unlock()
 		} else if c.ExpiresAfterAccessDuration != emptyDuration {
+			c.mu.Lock()
 			c.tstamp[key] = time.Now().Add(c.ExpiresAfterAccessDuration)
+			c.mu.Unlock()
 		}
-		c.mu.Lock()
-		c.statHits++
-		c.mu.Unlock()
+		atomic.AddInt64(&c.statHits, 1)
 		return v, nil
 	} else {
 		return nil, ErrNotPresent
@@ -156,8 +162,8 @@ func (c *PowerCache) GetWithValueLoader(key string, valueLoader ValueLoader) (in
 }
 
 func (c *PowerCache) isKeyExpired(key string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.ExpiresAfterAccessDuration != emptyDuration {
 		if a, ok := c.tstamp[key]; ok {
 			if time.Now().After(a.Add(c.ExpiresAfterAccessDuration)) {
@@ -320,6 +326,8 @@ func (c *PowerCache) SetWeight(key string, weight int64) {
 }
 
 func (c *PowerCache) HitRate() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.statReqs == 0 {
 		return 0.0
 	}
@@ -327,9 +335,13 @@ func (c *PowerCache) HitRate() float64 {
 }
 
 func (c *PowerCache) AverageLoadPenalty() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.statLoadDur
 }
 
 func (c *PowerCache) EvictionCount() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.statEvictions
 }
